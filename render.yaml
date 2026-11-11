@@ -1,0 +1,28 @@
+# Render Blueprint for the Binance spot monitor.
+# Reference: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: binance-spot-monitor
+    runtime: node
+    # Binance answers HTTP 451 to US IPs. Render's default region (oregon), ohio and
+    # virginia are all in the US. The region can't be changed after creation.
+    region: frankfurt
+    # The free plan spins down after 15 minutes without inbound traffic, which stops
+    # the Binance streams and the Telegram alerts. Use `plan: free` only for testing.
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      # `npm start` runs `node --use-system-ca`, which needs Node 22.15 or newer.
+      - key: NODE_VERSION
+        value: "24"
+      # Secrets: Render asks for these values when the Blueprint is first created.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      # Optional tuning read by index.js (defaults are set there). Add any of these in
+      # the Render dashboard to change them: MIN_VOLUME_USDT, M1_STREAK, VOL_SPIKE_X,
+      # VOL_SPIKE_BUY_RATIO, VOL_SPIKE_MAX_PRICE, VOL_SPIKE_MIN_USDT, PUMP_THRESHOLD,
+      # H1_THRESHOLD
