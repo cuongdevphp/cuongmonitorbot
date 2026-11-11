@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Binance Spot Monitor - Real-time</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #fff;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .stat-box {
+            background: rgba(255,255,255,0.1);
+            padding: 15px 30px;
+            border-radius: 10px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .stat-box h3 {
+            font-size: 0.9em;
+            opacity: 0.8;
+            margin-bottom: 5px;
+        }
+
+        .stat-box .value {
+            font-size: 1.8em;
+            font-weight: bold;
+        }
+
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .controls input, .controls select {
+            padding: 10px 15px;
+            border: none;
+            border-radius: 5px;
+            font-size: 1em;
+            background: rgba(255,255,255,0.9);
+        }
+
+        .controls button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            font-size: 1em;
+            cursor: pointer;
+            background: #4CAF50;
+            color: white;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .controls button:hover {
+            background: #45a049;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+
+        .table-container {
+            background: rgba(255,255,255,0.95);
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        thead {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        th {
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 0.95em;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        tbody {
+            color: #333;
+        }
+
+        tr {
+            border-bottom: 1px solid #e0e0e0;
+            transition: background 0.2s;
+        }
+
+        tbody tr:hover {
+            background: rgba(102, 126, 234, 0.1);
+        }
+
+        td {
+            padding: 12px 15px;
+            font-size: 0.95em;
+        }
+
+        .symbol {
+            font-weight: bold;
+            font-size: 1.1em;
+            color: #2c3e50;
+        }
+
+        .type-long {
+            color: #00ff00;
+            font-weight: bold;
+            text-shadow: 0 0 5px rgba(0,255,0,0.3);
+        }
+
+        .type-short {
+            color: #ff0000;
+            font-weight: bold;
+            text-shadow: 0 0 5px rgba(255,0,0,0.3);
+        }
+
+        .type-flat {
+            color: #ffaa00;
+            font-weight: bold;
+        }
+
+        .positive {
+            color: #00aa00;
+            font-weight: bold;
+        }
+
+        .negative {
+            color: #cc0000;
+            font-weight: bold;
+        }
+
+        .time {
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        .no-data {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+            font-size: 1.2em;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        tbody tr {
+            animation: fadeIn 0.3s ease-in;
+        }
+
+        .status {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 10px 20px;
+            border-radius: 5px;
+            font-weight: bold;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .status.connected {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .status.disconnected {
+            background: #f44336;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="status" id="status">Đang kết nối...</div>
+    
+    <div class="container">
+        <!-- <h1>📊 Binance Spot Monitor</h1> -->
+        
+        <div class="stats">
+            <div class="stat-box">
+                <h3>Tổng cặp</h3>
+                <div class="value" id="totalPairs">0</div>
+            </div>
+            <div class="stat-box">
+                <h3>LONG</h3>
+                <div class="value" style="color: #00ff00;" id="longCount">0</div>
+            </div>
+            <div class="stat-box">
+                <h3>SHORT</h3>
+                <div class="value" style="color: #ff0000;" id="shortCount">0</div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <input type="text" id="searchInput" placeholder="🔍 Tìm kiếm symbol (VD: BTC, ETH)">
+            <select id="filterType">
+                <option value="all">Tất cả</option>
+                <option value="LONG">LONG</option>
+                <option value="SHORT">SHORT</option>
+                <option value="FLAT">FLAT</option>
+            </select>
+            <select id="sortBy">
+                <option value="time">Thời gian</option>
+                <option value="change">% Thay đổi</option>
+                <option value="volume">Volume</option>
+            </select>
+            <button onclick="clearData()">🗑️ Xóa dữ liệu</button>
+        </div>
+
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Thời gian</th>
+                        <th>Symbol</th>
+                        <th>Type</th>
+                        <th>Current Price</th>
+                        <th>% Thay đổi</th>
+                        <th>Volume</th>
+                    </tr>
+                </thead>
+                <tbody id="dataTable">
+                    <tr>
+                        <td colspan="6" class="no-data">Đang chờ dữ liệu...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        let dataStore = [];
+        let ws;
+
+        function connectWebSocket() {
+            ws = new WebSocket('ws://localhost:3000');
+
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                document.getElementById('status').textContent = '🟢 Đã kết nối';
+                document.getElementById('status').className = 'status connected';
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    // Thêm hoặc cập nhật dữ liệu
+                    const existingIndex = dataStore.findIndex(item => item.symbol === data.symbol);
+                    if (existingIndex !== -1) {
+                        dataStore[existingIndex] = data;
+                    } else {
+                        dataStore.unshift(data);
+                    }
+
+                    // Giới hạn 20 records
+                    if (dataStore.length > 10) {
+                        dataStore = dataStore.slice(0, 10);
+                    }
+
+                    updateTable();
+                    updateStats();
+                } catch (error) {
+                    console.error('Error parsing message:', error);
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket disconnected. Reconnecting...');
+                document.getElementById('status').textContent = '🔴 Mất kết nối';
+                document.getElementById('status').className = 'status disconnected';
+                setTimeout(connectWebSocket, 3000);
+            };
+        }
+
+        function updateTable() {
+            const searchTerm = document.getElementById('searchInput').value.toUpperCase();
+            const filterType = document.getElementById('filterType').value;
+            const sortBy = document.getElementById('sortBy').value;
+
+            let filteredData = dataStore.filter(item => {
+                const matchSearch = item.symbol.includes(searchTerm);
+                const matchType = filterType === 'all' || item.type === filterType;
+                return matchSearch && matchType;
+            });
+
+            // Sắp xếp
+            filteredData.sort((a, b) => {
+                if (sortBy === 'change') {
+                    return Math.abs(b.change) - Math.abs(a.change);
+                } else if (sortBy === 'volume') {
+                    return b.volume - a.volume;
+                }
+                return new Date(b.time) - new Date(a.time);
+            });
+
+            const tbody = document.getElementById('dataTable');
+            
+            if (filteredData.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="no-data">Không có dữ liệu</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = filteredData.map(item => {
+                const typeClass = item.type === 'LONG' ? 'type-long' : 
+                                 item.type === 'SHORT' ? 'type-short' : 'type-flat';
+                const changeClass = item.change >= 0 ? 'positive' : 'negative';
+                
+                return `
+                    <tr>
+                        <td class="time">${item.time}</td>
+                        <td class="symbol">${item.symbol}</td>
+                        <td class="${typeClass}">${item.type}</td>
+                        <td>${item.currentPrice}</td>
+                        <td class="${changeClass}">${item.change >= 0 ? '+' : ''}${item.change}%</td>
+                        <td>${item.volume}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function updateStats() {
+            const longCount = dataStore.filter(item => item.type === 'LONG').length;
+            const shortCount = dataStore.filter(item => item.type === 'SHORT').length;
+            const flatCount = dataStore.filter(item => item.type === 'FLAT').length;
+
+            document.getElementById('totalPairs').textContent = dataStore.length;
+            document.getElementById('longCount').textContent = longCount;
+            document.getElementById('shortCount').textContent = shortCount;
+            document.getElementById('flatCount').textContent = flatCount;
+        }
+
+        function clearData() {
+            if (confirm('Bạn có chắc muốn xóa tất cả dữ liệu?')) {
+                dataStore = [];
+                updateTable();
+                updateStats();
+            }
+        }
+
+        // Event listeners
+        document.getElementById('searchInput').addEventListener('input', updateTable);
+        document.getElementById('filterType').addEventListener('change', updateTable);
+        document.getElementById('sortBy').addEventListener('change', updateTable);
+
+        // Kết nối WebSocket khi trang load
+        connectWebSocket();
+    </script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "name": "binance-spot-monitor",
+  "version": "1.0.0",
+  "description": "Monitor all Binance spot markets with 1-minute klines via WebSocket",
+  "main": "index.js",
+  "scripts": {
+    "start": "node --use-system-ca index.js"
+  },
+  "keywords": ["binance", "websocket", "spot", "trading"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "ws": "^8.16.0",
+    "axios": "^1.6.7",
+    "express": "^4.18.2"
+  }
+}
