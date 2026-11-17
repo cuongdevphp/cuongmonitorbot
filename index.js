@@ -3,6 +3,7 @@ const axios = require('axios');
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const util = require('util');
 
 // Đọc .env nếu có (Node >= 21) - phải chạy trước khi đọc process.env bên dưới
 try { process.loadEnvFile(); } catch (_) { /* không có .env thì bỏ qua */ }
@@ -18,7 +19,55 @@ app.use(express.static(path.join(__dirname, 'public')));
 // WebSocket clients
 const clients = new Set();
 
-wss.on('connection', (ws) => {
+// ================== GƯƠNG CONSOLE -> TRANG /console.html (xem log trên điện thoại) ==================
+// Mọi dòng console.log/warn/error vẫn in ra terminal như cũ, đồng thời được đẩy qua WebSocket ở đường dẫn /log.
+// Giữ LOG_BUFFER_MAX dòng gần nhất: màn hình vừa mở hoặc kết nối lại (iOS ngắt socket khi app xuống nền) vẫn thấy được.
+const LOG_BUFFER_MAX = 500;
+const logBuffer = [];
+const logClients = new Set();
+
+function mirrorLog(level, args) {
+    const text = util.format(...args).trim();
+    if (!text || /^=+$/.test(text)) return; // bỏ dòng trống và dòng kẻ ==== (chỉ để trang trí trong terminal)
+    const entry = { t: Date.now(), level, signal: /^=+ (🟢|📊|🚀|📈)/u.test(text), text };
+    logBuffer.push(entry);
+    if (logBuffer.length > LOG_BUFFER_MAX) logBuffer.shift();
+    if (logClients.size === 0) return;
+    const msg = JSON.stringify({ kind: 'log', ...entry });
+    for (const c of logClients) {
+        if (c.readyState !== WebSocket.OPEN) continue;
+        if (c.bufferedAmount > 1e6) { c.terminate(); continue; } // client treo (vd: iPhone khóa màn hình): bỏ để không phình bộ nhớ
+        c.send(msg);
+    }
+}
+
+for (const level of ['log', 'warn', 'error']) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => {
+        original(...args);
+        try { mirrorLog(level, args); } catch (_) { /* lỗi của gương không được làm hỏng log gốc */ }
+    };
+}
+
+// Socket của điện thoại có thể chết mà server không hay (khóa màn hình, mất Wi-Fi): ping định kỳ, không phản hồi thì đóng
+setInterval(() => {
+    for (const c of logClients) {
+        if (c.isAlive === false) { c.terminate(); continue; }
+        c.isAlive = false;
+        c.ping();
+    }
+}, 30000);
+
+wss.on('connection', (ws, req) => {
+    if ((req.url || '').split('?')[0] === '/log') { // trang /console.html: chỉ nhận log, không nhận dữ liệu bảng
+        ws.isAlive = true;
+        ws.on('pong', () => { ws.isAlive = true; });
+        ws.on('error', () => logClients.delete(ws));
+        ws.on('close', () => logClients.delete(ws));
+        logClients.add(ws);
+        ws.send(JSON.stringify({ kind: 'backlog', lines: logBuffer }));
+        return;
+    }
     console.log('Client connected to web interface');
     clients.add(ws);
 
@@ -106,7 +155,7 @@ async function getAllSpotSymbols() {
 }
 
 // ================== 5 NẾN 1 PHÚT TĂNG LIÊN TIẾP ==================
-// Nến tăng = close > open. Báo Telegram khi chuỗi nến xanh liên tiếp đạt M1_STREAK (mặc định 5).
+// Nến tăng = close > open. Báo khi chuỗi nến xanh liên tiếp đạt M1_STREAK (mặc định 5).
 // Chỉ báo 1 lần cho mỗi chuỗi; chuỗi bị ngắt (nến đỏ / đứng giá / mất nến) thì đếm lại từ đầu.
 const M1_STREAK = parseInt(process.env.M1_STREAK) || 5;
 const m1Streaks = new Map(); // symbol -> { count, lastOpenTime, startOpen }
@@ -130,7 +179,6 @@ function check5M1Streak(symbol, openTime, open, close) {
         console.log('=======================================================');
         console.log(`======= 🟢 ${M1_STREAK} NẾN 1M TĂNG: ${symbol.padEnd(14)} +${change.toFixed(2)}% | ${s.startOpen} -> ${close} | ${new Date().toLocaleTimeString()}`);
         console.log('=======================================================');
-        queueAlert(`${symbol}_M1`, `🟢 ${M1_STREAK} nến 1M tăng liên tiếp: ${symbol} +${change.toFixed(2)}% | ${s.startOpen} -> ${close}`);
     }
 }
 
@@ -172,7 +220,6 @@ function checkVolumeSpike(symbol, kline) {
             console.log('=======================================================');
             console.log(`======= 📊 VOLUME ĐỘT BIẾN: ${symbol.padEnd(14)} x${ratio.toFixed(1)} | Mua chủ động ${(buyRatio * 100).toFixed(0)}% | Giá +${priceChange.toFixed(2)}% | Vol ${quoteVol.toFixed(0)} USDT | ${new Date().toLocaleTimeString()}`);
             console.log('=======================================================');
-            queueAlert(`${symbol}_VOL`, `📊 Volume đột biến: ${symbol} x${ratio.toFixed(1)} so với TB ${h.vols.length} nến | mua chủ động ${(buyRatio * 100).toFixed(0)}% | giá +${priceChange.toFixed(2)}% | ${quoteVol.toFixed(0)} USDT`);
         }
     }
 
@@ -272,56 +319,6 @@ async function connectToAllMarkets() {
     });
 }
 
-// ================== THÔNG BÁO TELEGRAM (Bot API) ==================
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const TG_COOLDOWN_MS = 60 * 1000; // mỗi mã chỉ báo tối đa 1 lần / 60s
-const TG_FLUSH_MS = 3000;         // gom các alert lại, gửi 1 tin mỗi 3s để tránh bị rate limit
-const TG_MAX_LEN = 4096;          // Telegram giới hạn 4096 ký tự / tin
-const tgQueue = [];
-const tgLastSent = new Map();
-let tgPausedUntil = 0;            // khi bị 429, tạm dừng gửi tới thời điểm này
-
-if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.log('⚠️  Chưa cấu hình TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID - sẽ không gửi Telegram');
-}
-
-function queueAlert(symbol, text) {
-    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
-    const now = Date.now();
-    if (now - (tgLastSent.get(symbol) || 0) < TG_COOLDOWN_MS) return;
-    tgLastSent.set(symbol, now);
-    tgQueue.push(text);
-}
-
-setInterval(async () => {
-    if (tgQueue.length === 0 || Date.now() < tgPausedUntil) return;
-    // Lấy các alert vừa đủ 4096 ký tự, phần còn lại gửi lượt sau
-    let text = '';
-    while (tgQueue.length && (text.length + tgQueue[0].length + 1) <= TG_MAX_LEN) {
-        text += (text ? '\n' : '') + tgQueue.shift();
-    }
-    if (!text) text = tgQueue.shift().slice(0, TG_MAX_LEN);
-    try {
-        await axios.post(
-            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-            { chat_id: TELEGRAM_CHAT_ID, text, disable_web_page_preview: true },
-            { timeout: 10000 }
-        );
-    } catch (error) {
-        const data = error.response?.data;
-        // 429: Telegram yêu cầu chờ retry_after giây -> đưa tin lại đầu hàng đợi
-        if (error.response?.status === 429) {
-            const wait = (data?.parameters?.retry_after || 5) * 1000;
-            tgPausedUntil = Date.now() + wait;
-            tgQueue.unshift(text);
-            console.error(`Telegram rate limit, chờ ${wait / 1000}s`);
-        } else {
-            console.error('Lỗi gửi Telegram:', data?.description || error.message);
-        }
-    }
-}, TG_FLUSH_MS);
-
 // ================== SCAN TĂNG BẤT THƯỜNG TRONG 1 GIÂY ==================
 // Ngưỡng % tăng trong ~1s để coi là bất thường (có thể chỉnh qua env PUMP_THRESHOLD)
 const PUMP_THRESHOLD = parseFloat(process.env.PUMP_THRESHOLD) || 0.5;
@@ -377,7 +374,6 @@ function connectPumpScanner() {
                     console.log('=======================================================');
                     console.log(`======= 🚀 PUMP 1s: ${symbol.padEnd(14)} +${change.toFixed(2)}% | ${prev.price} -> ${price} | Vol 24h (quote): ${parseFloat(t.q).toFixed(2)} | ${new Date(time).toLocaleTimeString()}`);
                     console.log('=======================================================');
-                    queueAlert(symbol, `🚀 PUMP 1s: ${symbol} +${change.toFixed(2)}% | ${prev.price} -> ${price} | ${new Date(time).toLocaleTimeString()}`);
                 }
             }
         } catch (error) {
@@ -453,7 +449,6 @@ async function scan3H1() {
         console.log('=======================================================');
         console.log(`======= 📈 3 NẾN 1H: ${h.symbol.padEnd(14)} +${h.change.toFixed(2)}% | ${h.open} -> ${h.close} | Từng nến: ${h.candles}`);
         console.log('=======================================================');
-        queueAlert(`${h.symbol}_3H1`, `📈 3 nến 1H tăng: ${h.symbol} +${h.change.toFixed(2)}% | ${h.open} -> ${h.close} | ${h.candles}`);
     }
     console.log(`[${new Date().toLocaleTimeString()}] Quét 3 nến 1H xong: ${hits.length}/${symbols.length} mã thỏa điều kiện (mỗi nến >= ${H1_THRESHOLD}%)`);
 }

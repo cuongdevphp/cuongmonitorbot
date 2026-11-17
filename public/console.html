@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Monitor">
+    <meta name="theme-color" content="#0d1117">
+    <title>Binance Monitor - Console</title>
+    <style>
+        * { box-sizing: border-box; }
+        html, body { margin: 0; height: 100%; background: #0d1117; color: #c9d1d9; }
+        body {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            display: flex; flex-direction: column;
+            padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+            font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            -webkit-text-size-adjust: 100%;
+        }
+        header {
+            flex: none; display: flex; align-items: center; gap: 8px;
+            padding: 8px 10px; background: #161b22; border-bottom: 1px solid #30363d;
+        }
+        #status { font-size: 12px; white-space: nowrap; }
+        #status.on { color: #3fb950; }
+        #status.off { color: #f85149; }
+        .sp { flex: 1; }
+        button {
+            font: inherit; color: #c9d1d9; background: #21262d;
+            border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px;
+        }
+        button.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+        #log {
+            flex: 1; min-height: 0; overflow-y: auto; padding: 6px 10px;
+            -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+        }
+        .line { white-space: pre-wrap; word-break: break-word; padding: 2px 0 2px 6px; border-left: 3px solid transparent; }
+        .line .t { color: #6e7681; margin-right: 6px; }
+        .line.warn { color: #d29922; }
+        .line.error { color: #f85149; }
+        .line.signal { border-left-color: #3fb950; background: #12261e; font-weight: 600; }
+        .c31 { color: #f85149; }
+        .c32 { color: #3fb950; }
+        .c33 { color: #d29922; }
+        #log.only-signals .line:not(.signal) { display: none; }
+    </style>
+</head>
+<body>
+    <header>
+        <span id="status" class="off">🔴 Đang kết nối...</span>
+        <span class="sp"></span>
+        <button id="btnSignal" type="button">Chỉ tín hiệu</button>
+        <button id="btnClear" type="button">Xóa</button>
+    </header>
+    <main id="log"></main>
+
+    <script>
+        (() => {
+            'use strict';
+            const MAX_ROWS = 600;     // số dòng tối đa giữ trong màn hình
+            const STALE_MS = 90000;   // bot in nhịp tim mỗi 60s; quá 90s không có gì thì coi như socket chết
+            const logEl = document.getElementById('log');
+            const statusEl = document.getElementById('status');
+            const btnSignal = document.getElementById('btnSignal');
+            const btnClear = document.getElementById('btnClear');
+
+            let ws = null;
+            let retry = 0;
+            let retryTimer = null;
+            let lastMsgAt = Date.now();
+            let pending = [];
+            let flushTimer = null;
+
+            const pad = n => String(n).padStart(2, '0');
+            const fmtTime = ms => {
+                const d = new Date(ms);
+                return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+            };
+
+            function setStatus(on, text) {
+                statusEl.textContent = (on ? '🟢 ' : '🔴 ') + text;
+                statusEl.className = on ? 'on' : 'off';
+            }
+
+            // Mã màu ANSI trong log (vd \x1b[31m = đỏ) -> <span class="c31">. Dùng textContent nên không chèn được HTML.
+            function appendColored(target, text) {
+                const re = /\x1b\[([0-9;]*)m/g;
+                let cls = '';
+                let last = 0;
+                let m;
+                const add = s => {
+                    if (!s) return;
+                    const span = document.createElement('span');
+                    if (cls) span.className = cls;
+                    span.textContent = s;
+                    target.appendChild(span);
+                };
+                while ((m = re.exec(text)) !== null) {
+                    add(text.slice(last, m.index));
+                    const code = m[1].split(';').pop();
+                    cls = (code === '' || code === '0' || code === '39') ? '' : 'c' + code;
+                    last = re.lastIndex;
+                }
+                add(text.slice(last));
+            }
+
+            function makeLine(e) {
+                const div = document.createElement('div');
+                div.className = 'line' + (e.signal ? ' signal' : '') +
+                    (e.level === 'error' ? ' error' : e.level === 'warn' ? ' warn' : '');
+                const t = document.createElement('span');
+                t.className = 't';
+                t.textContent = fmtTime(e.t);
+                div.appendChild(t);
+                appendColored(div, e.text);
+                return div;
+            }
+
+            const atBottom = () => logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+
+            // Gom dòng mới rồi vẽ 1 lần mỗi 100ms; chỉ tự cuộn xuống cuối nếu đang ở cuối (kéo lên đọc thì không bị giật)
+            function flush() {
+                flushTimer = null;
+                if (pending.length === 0) return;
+                const stick = atBottom();
+                const frag = document.createDocumentFragment();
+                for (const e of pending) frag.appendChild(makeLine(e));
+                pending = [];
+                logEl.appendChild(frag);
+                while (logEl.childElementCount > MAX_ROWS) logEl.removeChild(logEl.firstElementChild);
+                if (stick) logEl.scrollTop = logEl.scrollHeight;
+            }
+
+            function enqueue(e) {
+                pending.push(e);
+                if (!flushTimer) flushTimer = setTimeout(flush, 100);
+            }
+
+            // Mỗi lần (kết nối lại) server gửi lại các dòng gần nhất: thay toàn bộ để không bị trùng
+            function showBacklog(lines) {
+                clearTimeout(flushTimer);
+                flushTimer = null;
+                logEl.textContent = '';
+                pending = lines.slice(-MAX_ROWS);
+                flush();
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+
+            function connect() {
+                clearTimeout(retryTimer);
+                if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+                setStatus(false, 'Đang kết nối...');
+                const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+                const sock = new WebSocket(proto + location.host + '/log');
+                ws = sock;
+                sock.onopen = () => {
+                    retry = 0;
+                    lastMsgAt = Date.now();
+                    setStatus(true, 'Đã kết nối');
+                };
+                sock.onmessage = ev => {
+                    lastMsgAt = Date.now();
+                    let m;
+                    try { m = JSON.parse(ev.data); } catch (_) { return; }
+                    if (m.kind === 'backlog') showBacklog(m.lines || []);
+                    else if (m.kind === 'log') enqueue(m);
+                };
+                sock.onclose = () => {
+                    if (ws !== sock) return; // socket cũ đã bị thay bằng socket mới
+                    setStatus(false, 'Mất kết nối');
+                    retryTimer = setTimeout(connect, Math.min(1000 * Math.pow(2, retry), 5000));
+                    retry++;
+                };
+                sock.onerror = () => { try { sock.close(); } catch (_) { /* đã đóng */ } };
+            }
+
+            // iOS đóng hoặc làm treo socket khi app xuống nền: quay lại thì mở kết nối mới (server gửi lại backlog)
+            function reconnectNow() {
+                if (ws) {
+                    const old = ws;
+                    ws = null;
+                    try { old.close(); } catch (_) { /* đã đóng */ }
+                }
+                retry = 0;
+                connect();
+            }
+
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'visible') reconnectNow();
+            });
+            window.addEventListener('pageshow', e => { if (e.persisted) reconnectNow(); });
+            window.addEventListener('online', reconnectNow);
+            setInterval(() => {
+                if (document.visibilityState === 'visible' && ws && ws.readyState === WebSocket.OPEN &&
+                    Date.now() - lastMsgAt > STALE_MS) reconnectNow();
+            }, 15000);
+
+            btnSignal.addEventListener('click', () => {
+                const on = logEl.classList.toggle('only-signals');
+                btnSignal.classList.toggle('active', on);
+                logEl.scrollTop = logEl.scrollHeight;
+            });
+            btnClear.addEventListener('click', () => {
+                pending = [];
+                logEl.textContent = '';
+            });
+
+            connect();
+        })();
+    </script>
+</body>
+</html>
