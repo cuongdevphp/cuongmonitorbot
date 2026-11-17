@@ -1,0 +1,7 @@
+node_modules
+.git
+.env
+.vscode
+*.log
+excluded-symbols.json
+render.yaml
